@@ -34,3 +34,5 @@ new-smoke/
 .claude/
 CLAUDE.md
 AGENTS.md
+suite-*/
+suite-smoke-run.out

@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Tiered JIT left 1-in-5 timed solves at 5-13 ms (tier-0 to tier-1 swap) in an 11-call run; steady state is fully optimised. -->
+    <TieredCompilation>false</TieredCompilation>
     <GridSimRoot Condition="'$(GridSimRoot)' == ''">../../..</GridSimRoot>
   </PropertyGroup>
   <ItemGroup>

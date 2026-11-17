@@ -99,13 +99,18 @@ source archive, so pip builds it locally.
 
 MATPOWER, Julia and the Julia project (download links in TOOLS.md):
 
-    unzip matpower8.1.zip                      # gives matpower-8.1/
+    unzip matpower8.1.zip && mv matpower8.1 matpower-8.1   # the zip unpacks to matpower8.1/
     curl -LO https://julialang-s3.julialang.org/bin/linux/x64/1.10/julia-1.10.12-linux-x86_64.tar.gz
     tar -xzf julia-1.10.12-linux-x86_64.tar.gz # gives julia-1.10.12/
     JULIA_DEPOT_PATH=$PWD/.julia ./julia-1.10.12/bin/julia --startup-file=no --project=julia-env -e 'using Pkg; Pkg.instantiate()'
 
-Check the Julia download against the SHA-256 published beside it. The
-julia-env Manifest is platform-independent; Pkg fetches Linux artifacts.
+Check the Julia download against its published SHA-256 (there is no
+checksum file beside the tarball; it is under bin/checksums/):
+
+    curl -s https://julialang-s3.julialang.org/bin/checksums/julia-1.10.12.sha256 | grep linux-x86_64.tar.gz
+    sha256sum julia-1.10.12-linux-x86_64.tar.gz
+
+The julia-env Manifest is platform-independent; Pkg fetches Linux artifacts.
 
 GNU Octave: the launcher uses `octave-11.3.0/bin/octave-cli` under the
 runtime directory if present, otherwise `octave-cli` on PATH. Ubuntu's
@@ -113,19 +118,73 @@ packaged Octave is older than the 11.3.0 used on Windows. Each MATPOWER
 attempt records the Octave version. To match Windows, build 11.3.0 from
 source with `--prefix=<runtime>/octave-11.3.0`, or pass --octave.
 
-Build the driver:
+Build the driver as Release (no shared build lock is needed on the server):
 
-    dotnet build driver/BenchmarkDriver.csproj -c Debug -nr:false -p:GridSimRoot=$PWD/../GridSim -p:RestoreLockedMode=true
+    bash build-driver.sh --gridsim ../GridSim
 
-Smoke, then measure:
+It runs the locked restore first. If the Ubuntu SDK's ILLink task differs
+from GridSim.Core's packages.lock.json the restore fails with NU1004; the
+script then retries unlocked and restores the lock file so the GridSim
+checkout stays clean. `run-benchmark.sh` uses `driver/bin/Release` when it
+exists and falls back to Debug. The manifest records the build configuration.
 
-    bash run-benchmark.sh --smoke --jobs 9 --output ./smoke-linux
-    ./.venv/bin/python -m unittest test_pilot test_scheduler
-    bash run-benchmark.sh --jobs 9 --output ./measurement-linux-$(date -u +%Y%m%d-%H%M%S)
+Use a venv whose interpreter is not resolved to the system Python. run.py
+and run-suite.py keep the path you give (`--python`, default
+`.venv/bin/python`) as it is, so a plain symlinked venv works.
+
+Smoke, then measure (one path at a time on one fixed CPU, the OS on the others):
+
+    bash run-benchmark.sh --smoke --jobs 1 --pin --output ./smoke-linux
+    ./.venv/bin/python -m unittest test_pilot test_scheduler test_suite
+    bash run-benchmark.sh --jobs 1 --pin --output ./measurement-linux-$(date -u +%Y%m%d-%H%M%S)
     ./.venv/bin/python verify_bundle.py ./measurement-linux-...
+
+`--jobs N` stays available but is not recommended for timing runs; see the
+parallel section below.
 
 test_pilot reads `smoke/dense/attempt-01.json`, so copy or link a smoke
 bundle to `smoke` first.
+
+## Full MATPOWER suite
+
+`run-suite.py` runs every pinned MATPOWER 8.1 case up to 5,000 buses (67
+cases, 4 to 3,374 buses), smallest first, each through the nine solver
+paths. On Linux, for timing:
+
+    bash build-driver.sh --gridsim ../GridSim
+    bash run-benchmark.sh --suite --jobs 1 --pin --output ./suite-linux-$(date -u +%Y%m%d-%H%M%S)
+
+That is `--jobs 1 --pin`: paths run one after another on one fixed CPU and
+the OS keeps the others. It takes many hours. Add `--max-buses N` or
+`--cases case14.m case118.m` for a subset, and `--rehearsal` to label a run
+made on a busy machine. The same flags work directly:
+`python run-suite.py --gridsim ../GridSim --driver driver/bin/Release/net10.0/BenchmarkDriver.dll
+--output DIR --external-python .venv/bin/python --octave $(command -v octave-cli)
+--julia julia-1.10.12/bin/julia --jobs 1 --pin`.
+
+`matpower-8.1-cases.json` pins the bus count and SHA-256 of 78 MATPOWER 8.1
+`data/` cases. A pinned case whose bytes differ is refused. Other
+`data/case*.m` files are not pinned: they are listed under `unlistedDataCases`
+in `suite-manifest.json` and skipped. `materialise_cases.m` (Octave) flattens
+each case to bus, gen and branch matrices for every path and rejects cases
+with DC lines, switches or bus links (`case_RTS_GMLC.m`). Those rows read
+`case not materialised` in `comparison.csv`, with the reason in `note`.
+
+Output folder:
+
+- `<case>/` (`manifest.json`, `report.md`, per-path evidence) and `<case>.log`
+- `comparison.csv`: one row per case and path (status, converged, mean ms,
+  worst residual, case exit code)
+- `attempt-results.csv`: one row per attempt
+- `suite-manifest.json`, `materialise.log`, `materialised/`, `progress.md`
+
+`build_results.py DIR` rebuilds `attempt-results.csv` and, with matplotlib,
+three charts and the coverage table; `build_chart_pack.py DIR` writes the
+ten-chart pack (matplotlib and numpy are not in the lock files);
+`render_progress.py DIR [--watch]` refreshes `progress.md` while a run is going.
+
+A single case runs with `run.py --case case14.m ...` (needs --octave).
+case118 (`--smoke`) and case1354pegase behave as before.
 
 ## Parallel runs (Linux)
 
@@ -155,10 +214,10 @@ report.md states how the paths were scheduled.
 - A rented VM is noisy. Its vCPUs share physical cores, caches and memory
   bandwidth with other tenants, and the hypervisor can migrate them.
   Compare timings only within one machine and one run. Never compare them
-  with timings from other hardware or with a run on another day or instance.
+  with Windows laptop timings or with a run on another day or instance.
 - Concurrent paths share the last-level cache and memory bandwidth even
-  when pinned. For publishable numbers, run --jobs 1 --pin as well and
-  check that the parallel medians agree.
+  when pinned. Use `--jobs 1 --pin` for timing runs. Higher --jobs is for
+  quick passes, not for numbers you publish.
 - Many VMs have no cpufreq (cpuGovernors is then null), so the host
   controls frequency scaling. Where cpufreq is available, set the
   performance governor before measuring.

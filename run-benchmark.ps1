@@ -3,6 +3,8 @@ param(
     [string] $Output,
     [switch] $Smoke,
     [switch] $Rehearsal,
+    [switch] $Suite,
+    [string[]] $Cases = @(),
     [string] $GridSim = '',
     [string] $RuntimeRoot = $PSScriptRoot,
     [string] $Octave = '',
@@ -46,12 +48,15 @@ $env:OMP_NUM_THREADS = '1'
 $env:MKL_NUM_THREADS = '1'
 $env:NUMBA_NUM_THREADS = '1'
 
+$entry = if ($Suite) { 'run-suite.py' } else { 'run.py' }
 $runArguments = @(
-    (Join-Path $PSScriptRoot 'run.py'), '--gridsim', $root, '--driver', $driver,
+    (Join-Path $PSScriptRoot $entry), '--gridsim', $root, '--driver', $driver,
     '--output', $Output, '--matpower', $matpower, '--external-python', $python,
     '--octave', $octave, '--julia', $julia, '--julia-project', $project
 )
 if ($Smoke) { $runArguments += '--smoke' }
+$Cases = @($Cases | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+if ($Suite -and $Cases) { $runArguments += '--cases'; $runArguments += $Cases }
 if ($Rehearsal) { $runArguments += '--rehearsal' }
 & $python @runArguments
 exit $LASTEXITCODE
