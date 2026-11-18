@@ -10,5 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="$(GridSimRoot)/src/GridSim.Core/GridSim.Core.csproj" />
+    <!-- gpu-dense / gpu-sparse paths (CUDA through ILGPU) and their CPU-fallback counters (GridSim RC4). -->
+    <ProjectReference Include="$(GridSimRoot)/src/GridSim.Gpu/GridSim.Gpu.csproj" />
   </ItemGroup>
 </Project>

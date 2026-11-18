@@ -11,7 +11,7 @@ if len(sys.argv) < 2:
     sys.exit("Usage: python render_progress.py SUITE_OUTPUT_DIR [--watch]")
 root = Path(sys.argv[1])
 threshold = 1e-8
-modes = ("dense", "sparse", "matpower", "pandapower", "pypsa", "veragrid",
+modes = ("dense", "sparse", "gpu-dense", "gpu-sparse", "matpower", "pandapower", "pypsa", "veragrid",
          "powsybl", "andes", "powermodels")
 _suite = root / "suite-manifest.json"
 expected = (len(json.loads(_suite.read_text(encoding="utf-8"))["scheduledCases"])
@@ -30,6 +30,7 @@ def render():
                 and float(row["max_original_residual_pu"]) <= threshold)
 
     labels = {"dense": "GridSim Dense", "sparse": "GridSim Sparse",
+              "gpu-dense": "GridSim GPU Dense", "gpu-sparse": "GridSim GPU Sparse",
               "matpower": "MATPOWER", "pandapower": "pandapower",
               "pypsa": "PyPSA", "veragrid": "VeraGrid", "powsybl": "PowSyBl",
               "andes": "ANDES", "powermodels": "PowerModels"}
@@ -56,7 +57,7 @@ def render():
                         if passes(row) and row["mean_ms"])
         if ranked and ranked[0][1] == "sparse":
             sparse_leads += 1
-            external = next((ms for ms, mode in ranked if mode not in ("dense", "sparse")), None)
+            external = next((ms for ms, mode in ranked if mode not in ("dense", "sparse", "gpu-dense", "gpu-sparse")), None)
             if external is not None:
                 sparse_ratios.append(external / ranked[0][0])
 

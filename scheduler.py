@@ -10,7 +10,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-TIMEOUT_SECONDS = 900
+TIMEOUT_SECONDS = int(os.environ.get("GRIDSIM_HARNESS_TIMEOUT", "900"))   # per worker; raise for the large tier
 
 # Applied to every pinned job so that no runtime starts more threads than its single core.
 PINNED_ENVIRONMENT = {
@@ -103,9 +103,27 @@ def run_command(command, log_path, core=None, env=None):
     started = time.perf_counter()
     with log_path.open("wb") as log:
         try:
-            status = subprocess.run(launch, stdout=log, stderr=subprocess.STDOUT, env=env,
-                                    timeout=TIMEOUT_SECONDS, check=False)
-            outcome["exitCode"] = status.returncode
+            if hasattr(os, "wait4"):
+                # Linux: wait4 also returns the worker's peak resident set (ru_maxrss, KiB), recorded as peakRssMb.
+                process = subprocess.Popen(launch, stdout=log, stderr=subprocess.STDOUT, env=env)
+                deadline = time.perf_counter() + TIMEOUT_SECONDS
+                while True:
+                    pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+                    if pid:
+                        process.returncode = os.waitstatus_to_exitcode(status)
+                        outcome["exitCode"] = process.returncode
+                        outcome["peakRssMb"] = round(usage.ru_maxrss / 1024, 1)
+                        break
+                    if time.perf_counter() > deadline:
+                        process.kill()
+                        _, _, usage = os.wait4(process.pid, 0)
+                        outcome["peakRssMb"] = round(usage.ru_maxrss / 1024, 1)
+                        raise subprocess.TimeoutExpired(launch, TIMEOUT_SECONDS)
+                    time.sleep(0.05)
+            else:
+                status = subprocess.run(launch, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                        timeout=TIMEOUT_SECONDS, check=False)
+                outcome["exitCode"] = status.returncode
         except (OSError, subprocess.TimeoutExpired) as error:
             outcome["error"] = str(error)
     outcome["wallSeconds"] = round(time.perf_counter() - started, 3)

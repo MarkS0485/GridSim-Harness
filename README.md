@@ -234,3 +234,40 @@ later version. See [LICENSE](LICENSE).
 The licence covers this harness only. GridSim keeps its own licence (see the
 GridSim repository). Each solver and dataset listed in TOOLS.md keeps its own
 licence, and none of them is included here.
+
+## Extended case suite: standard, large and models tiers
+
+`cases-extended.json` catalogues every free MATPOWER-format case found in three pinned sources, plus the GridSim
+country models:
+
+| Source | Commit | Licence | In this repository |
+|---|---|---|---|
+| [MATPOWER](https://github.com/MATPOWER/matpower) `data/` | `b6c85b0` | per case (the BSD licence does not cover case files) | 27 cases whose header grants redistribution (CC BY 4.0, or NREL's notice for `case_RTS_GMLC.m`); the other 52 are fetched at run time |
+| [PGLib-OPF](https://github.com/power-grid-lib/pglib-opf) (typical, `api`, `sad`) | `dc6be4b` | CC BY 4.0 | all 198 |
+| [GridSim-Models](https://github.com/MarkS0485/GridSim-Models) | `e88cb19` | ODbL 1.0 | all 36 models, with their attribution files |
+
+`cases/LICENCES/` holds the source licences. Each catalogue entry records its source, commit, path, SHA-256, bus count,
+licence, and whether it is vendored or fetched. Identical files are listed once. Files whose power-flow data equals
+another file's are marked `pfEquivalentOf` and are not run. This covers every PGLib `__sad` variant, which changes only
+branch angle limits, and also `case30Q` and `case30pwl`.
+
+Not included: NESTA (discontinued; access on request) and the newer Texas A&M grids (Texas7k, Western, Eastern), whose
+origin refuses automated download and which have no GitHub mirror of the `.m` file.
+
+    python build_catalogue.py --src SOURCES --write-cases   # rebuild the catalogue from pinned checkouts
+    python fetch_cases.py --out FLAT                         # vendored + fetched cases, SHA-256 checked
+
+Run a tier through the same suite runner by pointing it at the catalogue and the flat folder:
+
+    GRIDSIM_HARNESS_CATALOGUE=cases-extended.json GRIDSIM_HARNESS_CASE_DIR=FLAT \
+    GRIDSIM_HARNESS_DENSE_MAX_BUSES=5000 GRIDSIM_HARNESS_GPU_DENSE_MAX_BUSES=1500 GRIDSIM_HARNESS_TIMEOUT=3600 \
+    python run-suite.py ... --min-buses 5001 --max-buses 100000 --gpu --jobs 1 --pin --cores 2
+
+- `--gpu` adds the GridSim `gpu-dense` and `gpu-sparse` paths (CUDA). Each attempt records how many Newton steps fell
+  back to the CPU LU.
+- Dense paths above the size limits are skipped and recorded in the manifest.
+- Every worker records its peak resident set (`peakRssMb`).
+- `run-models.py` runs the GridSim JSON models. Only GridSim reads them, so the gate is GridSim's own result: 10/10
+  converged, mismatch <= 1e-8 pu, and identical bits across attempts.
+
+With the variables unset, the harness is exactly the MATPOWER 8.1 suite above.

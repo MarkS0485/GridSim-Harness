@@ -24,11 +24,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from run import CASES, digest, executable
+from run import CASE_CATALOGUE, CASE_DIR, CASES, case_file, digest, executable
 from scheduler import host_metadata, is_linux
 
 HERE = Path(__file__).resolve().parent
-MODES = ("dense", "sparse", "matpower", "pandapower", "pypsa", "veragrid",
+MODES = ("dense", "sparse", "gpu-dense", "gpu-sparse", "matpower", "pandapower", "pypsa", "veragrid",
          "powsybl", "andes", "powermodels")
 HELPERS = ("run.py", "run-suite.py", "materialise_cases.m", "matpower-8.1-cases.json",
            "build_results.py", "build_chart_pack.py", "render_progress.py")
@@ -36,24 +36,27 @@ COLUMNS = ("case", "buses", "path", "status", "converged", "mean_ms",
            "max_original_residual_pu", "case_exit_code", "note")
 
 
-def select_cases(matpower, max_buses, names=None):
-    """Return (selected [(buses, name)], unlisted data/ case files). Refuses altered pinned files."""
+def select_cases(matpower, max_buses, names=None, min_buses=0):
+    """Return (selected [(buses, name)], unlisted data/ case files). Refuses altered pinned files.
+
+    Cases marked pfEquivalentOf (extended catalogue: same power-flow data as another case) are not selected."""
     data = matpower / "data"
     if names:
         unknown = sorted(set(names) - CASES.keys())
         if unknown:
-            raise ValueError(f"Not in matpower-8.1-cases.json, so not pinned: {', '.join(unknown)}")
+            raise ValueError(f"Not in {CASE_CATALOGUE.name}, so not pinned: {', '.join(unknown)}")
     chosen = sorted((entry["buses"], name) for name, entry in CASES.items()
-                    if (names and name in names) or (not names and entry["buses"] <= max_buses))
+                    if (names and name in names) or (not names and min_buses <= entry["buses"] <= max_buses
+                                                     and "pfEquivalentOf" not in entry))
     if not chosen:
         raise ValueError("No pinned cases selected")
     for _, name in chosen:
-        source = data / name
+        source = case_file(matpower, name)
         if not source.is_file():
-            raise ValueError(f"Missing MATPOWER 8.1 input: {source}")
+            raise ValueError(f"Missing pinned input: {source}")
         if digest(source) != CASES[name]["sha256"]:
-            raise ValueError(f"Case bytes do not match MATPOWER 8.1: {source}")
-    unlisted = sorted(path.name for path in data.glob("case*.m") if path.name not in CASES)
+            raise ValueError(f"Case bytes do not match {CASE_CATALOGUE.name}: {source}")
+    unlisted = [] if CASE_DIR else sorted(path.name for path in data.glob("case*.m") if path.name not in CASES)
     return chosen, unlisted
 
 
@@ -109,6 +112,9 @@ def parse_arguments(argv=None):
     parser.add_argument("--julia-project", type=Path, default=HERE / "julia-env")
     parser.add_argument("--max-buses", type=int, default=5000,
                         help="Run pinned cases up to this many buses (default 5000: 67 cases)")
+    parser.add_argument("--gpu", action="store_true", help="Also run the GridSim gpu-dense / gpu-sparse paths")
+    parser.add_argument("--min-buses", type=int, default=0,
+                        help="Smallest case to run (with --max-buses, selects a size band, e.g. the large tier)")
     parser.add_argument("--cases", nargs="+", metavar="CASE.m",
                         help="Run only these pinned cases (overrides --max-buses)")
     parser.add_argument("--only", nargs="+", choices=MODES,
@@ -135,7 +141,7 @@ def main(argv=None):
     parser, args = parse_arguments(argv)
     args.matpower = args.matpower.resolve()
     try:
-        cases, unlisted = select_cases(args.matpower, args.max_buses, args.cases)
+        cases, unlisted = select_cases(args.matpower, args.max_buses, args.cases, args.min_buses)
     except ValueError as error:
         parser.error(str(error))
     runtime = []
@@ -156,6 +162,8 @@ def main(argv=None):
         scheduler += ["--only", *args.only]
     if args.rehearsal:
         scheduler.append("--rehearsal")
+    if args.gpu:
+        scheduler.append("--gpu")
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -165,7 +173,8 @@ def main(argv=None):
         startedUtc=datetime.now(timezone.utc).isoformat(),
         runLabel="Busy-machine rehearsal" if args.rehearsal else "Measurement run",
         platform=platform.platform(), host=host_metadata(), command=sys.argv,
-        maxBuses=args.max_buses, scheduledCases=[name for _, name in cases],
+        maxBuses=args.max_buses, minBuses=args.min_buses, catalogue=CASE_CATALOGUE.name,
+        catalogueSha256=digest(CASE_CATALOGUE), caseDir=CASE_DIR, scheduledCases=[name for _, name in cases],
         caseSha256={name: CASES[name]["sha256"] for _, name in cases},
         unlistedDataCases=unlisted,
         harnessSourceSha256={file: hashlib.sha256((HERE / file).read_bytes()).hexdigest()

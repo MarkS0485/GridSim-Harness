@@ -4,7 +4,11 @@ install_matpower(1, 0, 0);
 for k = 3:numel(args)
     name = args{k};
     try
-        mpc = loadcase(fullfile(args{1}, 'data', name));
+        case_dir = getenv('GRIDSIM_HARNESS_CASE_DIR');
+        if isempty(case_dir)
+            case_dir = fullfile(args{1}, 'data');
+        end
+        mpc = loadcase(fullfile(case_dir, name));
         for field = {'dcline', 'switch', 'buslink'}
             if isfield(mpc, field{1}) && ~isempty(mpc.(field{1}))
                 error('Case has unsupported electrical field %s', field{1});

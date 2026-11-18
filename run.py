@@ -19,8 +19,24 @@ from scheduler import (Job, PINNED_ENVIRONMENT, host_metadata, is_linux, parse_c
 
 # Every MATPOWER 8.1 data/ case the suite may run: bus count and the SHA-256 of the upstream file.
 # A case that is not listed here, or whose bytes differ, is refused.
-CASE_CATALOGUE = Path(__file__).with_name("matpower-8.1-cases.json")
-CASES = json.loads(CASE_CATALOGUE.read_text(encoding="ascii"))
+# GRIDSIM_HARNESS_CATALOGUE selects another catalogue, e.g. cases-extended.json (its "cases" member has the same
+# per-case bus count and SHA-256), and GRIDSIM_HARNESS_CASE_DIR the flat folder holding those cases (fetch_cases.py).
+# Unset, the harness is exactly the MATPOWER 8.1 suite: the catalogue above and <--matpower>/data.
+CASE_CATALOGUE = Path(os.environ.get("GRIDSIM_HARNESS_CATALOGUE") or Path(__file__).with_name("matpower-8.1-cases.json"))
+_CATALOGUE = json.loads(CASE_CATALOGUE.read_text(encoding="ascii"))
+CASES = _CATALOGUE["cases"] if "cases" in _CATALOGUE else _CATALOGUE
+CASE_DIR = os.environ.get("GRIDSIM_HARNESS_CASE_DIR")
+# GridSim paths the driver runs. gpu-dense / gpu-sparse only with --gpu (a CUDA device; outside the CPU contract).
+GRIDSIM_MODES = ("dense", "sparse", "gpu-dense", "gpu-sparse")
+# Dense paths (CPU and GPU) store about 32 n^2 bytes and the GPU dense LU is O(n^3); above this bus count they are
+# not scheduled and the manifest says so. Unset: no limit (the MATPOWER 8.1 suite as before).
+DENSE_MAX_BUSES = int(os.environ.get("GRIDSIM_HARNESS_DENSE_MAX_BUSES") or 0)
+GPU_DENSE_MAX_BUSES = int(os.environ.get("GRIDSIM_HARNESS_GPU_DENSE_MAX_BUSES") or 0)
+
+
+def case_file(matpower, name):
+    """The upstream case file: <GRIDSIM_HARNESS_CASE_DIR>/name when set, else <matpower>/data/name."""
+    return (Path(CASE_DIR) if CASE_DIR else matpower / "data") / name
 
 SOLVER_FIELDS = ("vm", "vaDeg", "pInjMw", "qInjMvar", "totalLossMw",
                  "totalLossMvar", "lineFlows")
@@ -97,6 +113,8 @@ def run_path(mode, case, output, driver, source, commit, outcome=None):
             row["attempts"].append(dict(attempt=index, elapsedMs=attempt["elapsedMs"],
                                         converged=attempt["result"]["converged"],
                                         iterations=attempt["result"]["iterations"]))
+            if attempt.get("gpuSolves") is not None:
+                row["attempts"][-1]["gpuSolves"] = attempt["gpuSolves"]
             if attempt["result"]["converged"]:
                 result = attempt["result"]
                 voltages = dict(zip(result["busIds"], zip(result["vm"], result["vaDeg"])))
@@ -235,7 +253,9 @@ def main():
     parser.add_argument("--octave", type=Path)
     parser.add_argument("--julia", type=Path)
     parser.add_argument("--julia-project", type=Path, default=Path(__file__).parent / "julia-env")
-    parser.add_argument("--only", nargs="+", choices=("dense", "sparse", "matpower",
+    parser.add_argument("--gpu", action="store_true",
+                        help="Also run the gpu-dense and gpu-sparse GridSim paths (CUDA)")
+    parser.add_argument("--only", nargs="+", choices=("dense", "sparse", "gpu-dense", "gpu-sparse", "matpower",
                         "pandapower", "pypsa", "veragrid", "powsybl", "andes", "powermodels"),
                         help="Run selected paths for adapter development")
     parser.add_argument("--materialised-dir", type=Path,
@@ -262,9 +282,9 @@ def main():
     driver = args.driver.resolve(strict=True)
     output = args.output.resolve()
     case_name = "case118.m" if args.smoke else args.case or "case1354pegase.m"
-    case = args.matpower.resolve() / "data" / case_name
+    case = case_file(args.matpower.resolve(), case_name)
     if digest(case) != CASES[case_name]["sha256"]:
-        parser.error(f"Case bytes do not match MATPOWER 8.1: {case}")
+        parser.error(f"Case bytes do not match the catalogue ({CASE_CATALOGUE.name}): {case}")
     commit = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"],
                                      text=True).strip()
     output.mkdir(parents=True, exist_ok=False)
@@ -294,8 +314,9 @@ def main():
                "scheduler.py", "requirements.in", "requirements-windows-py312.lock",
                "requirements-linux-py312.lock",
                "julia-env/Project.toml", "julia-env/Manifest.toml", "verify_bundle.py",
-               "prepare_docs.py", "run-suite.py", "materialise_cases.m", CASE_CATALOGUE.name)
+               "prepare_docs.py", "run-suite.py", "materialise_cases.m")
     source_hashes = {file: digest(workspace / file) for file in sources}
+    source_hashes[CASE_CATALOGUE.name] = digest(CASE_CATALOGUE)
     power_mode = None
     if os.name == "nt":
         result = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
@@ -316,7 +337,15 @@ def main():
                     gridSimBuildConfiguration=driver.parent.parent.name,
                     harnessSourceSha256=source_hashes, host=host_metadata(), paths=[])
     workers = {}
-    for mode in ("dense", "sparse"):
+    buses = CASES[case_name]["buses"]
+    manifest["skippedPaths"] = {}
+    for mode in GRIDSIM_MODES:
+        if mode.startswith("gpu-") and not args.gpu:
+            continue
+        limit = GPU_DENSE_MAX_BUSES if mode == "gpu-dense" else DENSE_MAX_BUSES if mode == "dense" else 0
+        if limit and buses > limit:
+            manifest["skippedPaths"][mode] = f"{buses} buses is above the {mode} limit of {limit} (memory/time)"
+            continue
         workers[mode] = gridsim_command(mode, case, output, driver, commit)
     if args.octave:
         workers["matpower"] = [str(executable(args.octave)), "--no-init-file", "--quiet",
@@ -348,12 +377,12 @@ def main():
         folder = output / name
         folder.mkdir()
         jobs.append(Job(name, command, folder,
-                        "driver.log" if name in ("dense", "sparse") else "worker.log"))
+                        "driver.log" if name in GRIDSIM_MODES else "worker.log"))
     print(f"{case.name}: {len(jobs)} paths, "
           + (f"pinned to CPUs {cores}" if cores else "one after another"), flush=True)
     outcomes = run_jobs(jobs, cores)
     results = {}
-    for mode in ("dense", "sparse"):
+    for mode in GRIDSIM_MODES:
         if mode in outcomes:
             row, attempts, indices = run_path(mode, case, output, driver, source, commit,
                                               outcomes[mode])
@@ -379,7 +408,7 @@ def main():
                 pass  # run_path already recorded this comparison error in the evidence
 
     for name, command in workers.items():
-        if name in ("dense", "sparse"):
+        if name in GRIDSIM_MODES:
             continue
         row, state = collect_external(name, command, output, reference_case, outcomes[name])
         manifest["paths"].append(row)
